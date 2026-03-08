@@ -461,9 +461,12 @@ def sync():
         # 从 JSON 环境变量同步企业微信多账号
         merge_wecom_bots_from_env(channels, env)
 
-        # 若存在企业微信多账号配置，确保插件启用并写入安装信息
+        # 若存在企业微信多账号配置，默认可自动启用插件；
+        # 但如果本轮已因环境变量缺失而禁用渠道，则保持禁用，避免日志与最终插件状态冲突。
         wecom_accounts = get_wecom_accounts(channels.get('wecom'))
-        if wecom_accounts:
+        wecom_entry = entries.get('wecom')
+        wecom_explicitly_disabled = isinstance(wecom_entry, dict) and (wecom_entry.get('enabled') is False)
+        if wecom_accounts and not wecom_explicitly_disabled:
             entries['wecom'] = {'enabled': True}
             if 'wecom' not in installs:
                 installs['wecom'] = {
@@ -472,6 +475,8 @@ def sync():
                     'installPath': '/home/node/.openclaw/extensions/wecom',
                     'installedAt': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
                 }
+        elif wecom_explicitly_disabled:
+            print('ℹ️ 企业微信渠道已禁用，跳过根据历史多账号配置自动启用插件')
 
         # 汇总所有已启用的插件到 allow 列表
         plugins['allow'] = [k for k, v in entries.items() if v.get('enabled')]
