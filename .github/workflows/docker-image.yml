@@ -38,33 +38,38 @@ jobs:
       - name: 设置 Docker Buildx
         uses: docker/setup-buildx-action@v3
         
-      - name: 构建 Docker 镜像（不推送）
+      - name: 构建 Docker 镜像
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: false  # 不推送到仓库
+          platforms: linux/amd64  # 只构建 amd64 架构
+          push: false
           tags: |
             myapp:${{ steps.version.outputs.version }}
             myapp:latest
-          outputs: type=docker,dest=/tmp/myapp.tar  # 导出为 tar 文件
+          outputs: type=docker,dest=/tmp/myapp.tar  # 使用 docker 格式
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           
       - name: 上传镜像产物
         uses: actions/upload-artifact@v4
         with:
-          name: docker-image-${{ steps.version.outputs.version }}
+          name: myapp-${{ steps.version.outputs.version }}
           path: /tmp/myapp.tar
-          retention-days: 90  # 保留90天
+          retention-days: 90
           
       - name: 输出信息
         run: |
           echo "✅ Docker 镜像构建成功！"
           echo ""
           echo "📦 版本号: ${{ steps.version.outputs.version }}"
+          echo "🏗️ 架构: linux/amd64"
+          echo "📁 产物名称: myapp-${{ steps.version.outputs.version }}"
           echo ""
-          echo "📥 下载方法:"
-          echo "1. 进入 Actions -> 选择本次运行 -> 下载 docker-image-${{ steps.version.outputs.version }} 产物"
-          echo "2. 解压下载的文件（如果需要）"
-          echo "3. 加载镜像: docker load -i myapp.tar"
-          echo "4. 运行容器: docker run myapp:${{ steps.version.outputs.version }}"
+          echo "📥 下载和使用方法："
+          echo "1. 进入 Actions 页面，找到本次运行"
+          echo "2. 下载产物 myapp-${{ steps.version.outputs.version }}"
+          echo "3. 解压文件: unzip myapp-${{ steps.version.outputs.version }}.zip"
+          echo "4. 加载镜像: docker load -i myapp.tar"
+          echo "5. 运行容器: docker run myapp:${{ steps.version.outputs.version }}"
