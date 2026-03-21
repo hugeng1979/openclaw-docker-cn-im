@@ -120,3 +120,17 @@ WORKDIR /home/node
 
 # 使用初始化脚本作为入口点
 ENTRYPOINT ["/bin/bash", "/usr/local/bin/init.sh"]
+
+# 安装本人需要使用的插件 playwright chromium
+USER root
+RUN apt-get update && \
+    apt-get install -y python3-pip && \
+    rm -rf /var/lib/apt/lists/*
+
+USER node
+RUN pip3 install playwright --break-system-packages && \
+    playwright install chromium && \
+    pip3 install tavily-python --break-system-packages
+
+USER root
+WORKDIR /home/node
