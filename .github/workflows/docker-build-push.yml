@@ -59,38 +59,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
           
-      - name: 提取 Docker 元数据
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}
-            ${{ env.REGISTRY_GHCR }}/${{ github.repository }}
-          tags: |
-            type=raw,value=${{ steps.version.outputs.version }}
-            type=raw,value=latest
-            type=sha,prefix={{branch}}-
-            
-      - name: 构建并推送 Docker 镜像
+      - name: 构建并推送多架构镜像
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.version }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest
+            ${{ env.REGISTRY_GHCR }}/${{ github.repository }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY_GHCR }}/${{ github.repository }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: false  # 禁用 provenance 避免某些问题
           
       - name: 输出镜像信息
         run: |
           echo "✅ Docker 镜像构建并推送成功！"
           echo ""
-          echo "📋 镜像标签："
-          echo "${{ steps.meta.outputs.tags }}" | tr ',' '\n'
-          echo ""
           echo "🔖 版本号: ${{ steps.version.outputs.version }}"
           echo ""
-          echo "📦 Docker Hub: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.version }}"
-          echo "📦 GHCR: ${{ env.REGISTRY_GHCR }}/${{ github.repository }}:${{ steps.version.outputs.version }}"
+          echo "📦 Docker Hub 拉取命令:"
+          echo "docker pull ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.version }}"
+          echo ""
+          echo "📦 GHCR 拉取命令:"
+          echo "docker pull ${{ env.REGISTRY_GHCR }}/${{ github.repository }}:${{ steps.version.outputs.version }}"
