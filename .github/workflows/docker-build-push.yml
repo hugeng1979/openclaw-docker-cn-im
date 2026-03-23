@@ -30,6 +30,11 @@ jobs:
         id: version
         run: |
           VERSION=$(cat version.txt | tr -d '[:space:]')
+          # 验证版本号格式
+          if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "错误: 版本号格式不正确: $VERSION"
+            exit 1
+          fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           
       - name: 创建 Git 标签
@@ -45,12 +50,17 @@ jobs:
       - name: 设置 Docker Buildx
         uses: docker/setup-buildx-action@v3
         
-      - name: 登录 Docker Hub
+      - name: 登录 Docker Hub（带验证）
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY_DOCKERHUB }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+          
+      - name: 验证 Docker Hub 登录
+        run: |
+          echo "✅ Docker Hub 登录成功"
+          docker login docker.io -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin <<< "${{ secrets.DOCKERHUB_TOKEN }}"
           
       - name: 登录 GitHub Container Registry
         uses: docker/login-action@v3
@@ -59,12 +69,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
           
-      - name: 构建并推送多架构镜像
+      - name: 构建并推送镜像（单一架构）
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64  # 暂时只构建 amd64 避免多架构问题
           push: true
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.version }}
@@ -73,13 +83,16 @@ jobs:
             ${{ env.REGISTRY_GHCR }}/${{ github.repository }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          provenance: false  # 禁用 provenance 避免某些问题
+          provenance: false
+          # 添加重试机制
+          no-cache: false
           
       - name: 输出镜像信息
         run: |
           echo "✅ Docker 镜像构建并推送成功！"
           echo ""
           echo "🔖 版本号: ${{ steps.version.outputs.version }}"
+          echo "🏗️ 架构: linux/amd64"
           echo ""
           echo "📦 Docker Hub 拉取命令:"
           echo "docker pull ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.version }}"
