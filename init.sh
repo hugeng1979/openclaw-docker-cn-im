@@ -16,6 +16,131 @@ ensure_directories() {
     mkdir -p "$OPENCLAW_HOME" "$OPENCLAW_WORKSPACE"
 }
 
+ensure_config_persistence() {
+    log_section "配置 .config 目录持久化"
+    local persistent_config_dir="$OPENCLAW_HOME/.config"
+    local container_config_dir="/home/node/.config"
+
+    # 1. 创建持久化目录
+    mkdir -p "$persistent_config_dir"
+    
+    # 2. 处理现有目录与迁移
+    if [ -d "$container_config_dir" ] && [ ! -L "$container_config_dir" ]; then
+        # 如果持久化目录为空，将现有配置迁移过去
+        if [ -z "$(ls -A "$persistent_config_dir")" ]; then
+            echo "检测到容器内已有 .config 目录，正在迁移到持久化目录..."
+            cp -a "$container_config_dir/." "$persistent_config_dir/"
+        fi
+        rm -rf "$container_config_dir"
+    fi
+
+    # 3. 创建软链接
+    if [ ! -L "$container_config_dir" ]; then
+        ln -sfn "$persistent_config_dir" "$container_config_dir"
+        echo "已建立软链接: $container_config_dir -> $persistent_config_dir"
+    fi
+
+    # 4. 权限修复
+    if is_root; then
+        chown -R node:node "$persistent_config_dir" || true
+        chown -h node:node "$container_config_dir" || true
+    fi
+}
+
+sync_seed_extensions() {
+    local seed_dir="/home/node/.openclaw-seed/extensions"
+    local target_dir="$OPENCLAW_HOME/extensions"
+    local seed_version_file="$seed_dir/.seed-version"
+    local target_version_file="$target_dir/.seed-version"
+    local sync_mode="${SYNC_EXTENSIONS_MODE:-seed-version}"
+    local sync_on_start="${SYNC_EXTENSIONS_ON_START:-true}"
+    local normalized_mode normalized_toggle
+
+    normalized_mode="$(echo "$sync_mode" | tr '[:upper:]' '[:lower:]' | xargs)"
+    normalized_toggle="$(echo "$sync_on_start" | tr '[:upper:]' '[:lower:]' | xargs)"
+
+    if [ "$normalized_toggle" = "false" ] || [ "$normalized_toggle" = "0" ] || [ "$normalized_toggle" = "no" ]; then
+        echo "ℹ️ 已关闭启动时插件同步"
+        return
+    fi
+
+    if [ ! -d "$seed_dir" ]; then
+        echo "ℹ️ 未找到插件 seed 目录，跳过同步: $seed_dir"
+        return
+    fi
+
+    mkdir -p "$target_dir"
+
+    case "$normalized_mode" in
+        missing)
+            echo "=== 同步内置插件（仅补充缺失项） ==="
+            find "$seed_dir" -mindepth 1 -maxdepth 1 | while IFS= read -r seed_item; do
+                local item_name target_item
+                item_name="$(basename "$seed_item")"
+                target_item="$target_dir/$item_name"
+                if [ -e "$target_item" ]; then
+                    continue
+                fi
+                cp -a "$seed_item" "$target_item"
+                echo "➕ 已补充插件/文件: $item_name"
+            done
+            ;;
+        overwrite)
+            echo "=== 同步内置插件（强制覆盖） ==="
+            # 仅删除 seed 中存在的同名项，以保留用户自行添加的其他插件
+            find "$seed_dir" -mindepth 1 -maxdepth 1 ! -name '.seed-version' | while IFS= read -r seed_item; do
+                rm -rf "$target_dir/$(basename "$seed_item")"
+            done
+            cp -a "$seed_dir"/. "$target_dir"/
+            ;;
+        seed-version|versioned|"")
+            local seed_version current_version
+            seed_version=""
+            current_version=""
+            if [ -f "$seed_version_file" ]; then
+                seed_version="$(cat "$seed_version_file")"
+            fi
+            if [ -f "$target_version_file" ]; then
+                current_version="$(cat "$target_version_file")"
+            fi
+
+            if [ -n "$seed_version" ] && [ "$seed_version" = "$current_version" ]; then
+                echo "ℹ️ 内置插件已是最新 seed 版本: $seed_version"
+                return
+            fi
+
+            echo "=== 同步内置插件（按 seed 版本） ==="
+            if [ -n "$current_version" ]; then
+                echo "当前插件 seed 版本: $current_version"
+            else
+                echo "当前插件 seed 版本: 未初始化"
+            fi
+            if [ -n "$seed_version" ]; then
+                echo "镜像内置 seed 版本: $seed_version"
+            else
+                echo "镜像内置 seed 版本: 未标记，执行覆盖同步"
+            fi
+            # 仅删除 seed 中存在的同名项，以保留用户自行添加的其他插件
+            find "$seed_dir" -mindepth 1 -maxdepth 1 ! -name '.seed-version' | while IFS= read -r seed_item; do
+                rm -rf "$target_dir/$(basename "$seed_item")"
+            done
+            cp -a "$seed_dir"/. "$target_dir"/
+            ;;
+        *)
+            echo "⚠️ 未识别的 SYNC_EXTENSIONS_MODE=$sync_mode，支持 missing / overwrite / seed-version，已跳过插件同步"
+            return
+            ;;
+    esac
+
+    if is_root; then
+        chown -R node:node "$target_dir" || true
+    fi
+
+    rm -rf "$seed_dir"
+    echo "🧹 已清空插件 seed 目录: $seed_dir"
+    echo "✅ 内置插件同步完成，模式: ${normalized_mode:-seed-version}"
+}
+
 is_root() {
     [ "$(id -u)" -eq 0 ]
 }
@@ -168,7 +293,7 @@ QQBOT_RESERVED_FIELDS = {'enabled', 'appId', 'clientSecret', 'dmPolicy', 'allowF
 CHANNEL_INSTALLS = {
     'feishu': {'source': 'npm', 'spec': '@openclaw/feishu', 'installPath': '/home/node/.openclaw/extensions/feishu'},
     'dingtalk': {'source': 'npm', 'spec': 'https://github.com/soimy/clawdbot-channel-dingtalk.git', 'installPath': '/home/node/.openclaw/extensions/dingtalk'},
-    'qqbot': {'source': 'path', 'sourcePath': '/home/node/.openclaw/qqbot', 'installPath': '/home/node/.openclaw/extensions/qqbot'},
+    'openclaw-qqbot': {'source': 'path', 'sourcePath': '/home/node/.openclaw/openclaw-qqbot', 'installPath': '/home/node/.openclaw/extensions/openclaw-qqbot'},
     'napcat': {'source': 'path', 'sourcePath': '/home/node/.openclaw/extensions/napcat', 'installPath': '/home/node/.openclaw/extensions/napcat'},
     'wecom': {'source': 'npm', 'spec': '@sunnoy/wecom', 'installPath': '/home/node/.openclaw/extensions/wecom'},
 }
@@ -1457,6 +1582,7 @@ def apply_channel_rules(ctx):
         },
         {
             'channel': 'qqbot',
+            'plugin_id': 'openclaw-qqbot',
             'required_envs': ['QQBOT_APP_ID', 'QQBOT_CLIENT_SECRET'],
             'sync': lambda channel: sync_qqbot_channel(ctx, channel),
             'install': True,
@@ -1477,33 +1603,38 @@ def apply_channel_rules(ctx):
 
     for rule in rules:
         channel_id = rule['channel']
+        plugin_id = rule.get('plugin_id', channel_id)
         channel_label = channel_labels.get(channel_id, channel_id)
         has_env = all(ctx.env.get(key) for key in rule['required_envs'])
+
         if has_env:
             channel = ctx.channel(channel_id)
             rule['sync'](channel)
-            ctx.enable_channel(channel_id, install=rule['install'])
+            ctx.enable_channel(plugin_id, install=rule['install'])
+            if plugin_id != channel_id:
+                ctx.disable_channel(channel_id)
             print(f"✅ 渠道同步: {channel_label}")
             continue
 
         if channel_id == 'feishu' and not ctx.has_feishu_any_env:
-            ctx.disable_channel(channel_id)
+            ctx.disable_channel(plugin_id)
             continue
 
         if channel_id == 'dingtalk' and not ctx.has_dingtalk_any_env:
-            ctx.disable_channel(channel_id)
+            ctx.disable_channel(plugin_id)
             continue
 
         if channel_id == 'wecom' and not ctx.has_wecom_any_env:
-            ctx.disable_channel(channel_id)
+            ctx.disable_channel(plugin_id)
             continue
 
         if channel_id == 'qqbot' and not ctx.has_qqbot_any_env:
-            ctx.disable_channel(channel_id)
+            ctx.disable_channel(plugin_id)
+            ctx.entries.pop('qqbot', None)
             continue
 
-        if ctx.entries.get(channel_id, {}).get('enabled'):
-            ctx.disable_channel(channel_id)
+        if ctx.entries.get(plugin_id, {}).get('enabled'):
+            ctx.disable_channel(plugin_id)
             print(f"🚫 {channel_label} 环境变量缺失，已禁用渠道")
         else:
             print(f"ℹ️ {channel_label} 未提供环境变量，保持禁用")
@@ -1561,14 +1692,40 @@ def apply_multi_account_plugin_state(ctx):
     qqbot_accounts = get_qqbot_accounts(ctx.channels.get('qqbot'))
     if ctx.has_qqbot_bots_env:
         if qqbot_accounts:
-            ctx.enable_channel('qqbot', install=True)
-            print('✅ 已根据 QQ 机器人多 Bot 环境变量启用插件')
+            ctx.enable_channel('openclaw-qqbot', install=True)
+            print('✅ 已根据 QQ 机器人多 Bot 环境变量启用插件 openclaw-qqbot')
         else:
-            ctx.disable_channel('qqbot')
+            ctx.disable_channel('openclaw-qqbot')
             print('ℹ️ QQ 机器人多 Bot 环境变量未生成有效 Bot，保持插件禁用')
     elif not ctx.has_qqbot_any_env:
-        ctx.disable_channel('qqbot')
+        ctx.disable_channel('openclaw-qqbot')
         print('ℹ️ QQ 机器人未提供任何环境变量，保持插件禁用')
+
+
+def migrate_qqbot_plugin_entry(ctx):
+    legacy_plugin_id = 'qqbot'
+    official_plugin_id = 'openclaw-qqbot'
+    legacy_entry = ctx.entries.get(legacy_plugin_id)
+    official_entry = ctx.entries.get(official_plugin_id)
+
+    if isinstance(legacy_entry, dict):
+        if not isinstance(official_entry, dict):
+            ctx.entries[official_plugin_id] = deepcopy(legacy_entry)
+        elif legacy_entry.get('enabled') and not official_entry.get('enabled'):
+            official_entry['enabled'] = True
+
+    ctx.entries.pop(legacy_plugin_id, None)
+
+    legacy_install = ctx.installs.get(legacy_plugin_id)
+    official_install = ctx.installs.get(official_plugin_id)
+    if isinstance(legacy_install, dict):
+        if not isinstance(official_install, dict):
+            migrated_install = deepcopy(legacy_install)
+            migrated_install['sourcePath'] = '/home/node/.openclaw/openclaw-qqbot'
+            migrated_install['installPath'] = '/home/node/.openclaw/extensions/openclaw-qqbot'
+            ctx.installs[official_plugin_id] = migrated_install
+
+    ctx.installs.pop(legacy_plugin_id, None)
 
 
 def apply_feishu_plugin_switch(ctx):
@@ -1620,6 +1777,7 @@ def sync_channels_and_plugins(ctx):
     merge_dingtalk_accounts_from_env(ctx.channels, ctx.env)
     merge_wecom_accounts_from_env(ctx.channels, ctx.env)
     merge_qqbot_bots_from_env(ctx.channels, ctx.env)
+    migrate_qqbot_plugin_entry(ctx)
     apply_multi_account_plugin_state(ctx)
     apply_feishu_plugin_switch(ctx)
     finalize_plugins(ctx)
@@ -1807,7 +1965,123 @@ print_runtime_summary() {
 setup_runtime_env() {
     export BUN_INSTALL="/usr/local"
     export PATH="$BUN_INSTALL/bin:$PATH"
+    export AGENT_REACH_HOME="/home/node/.agent-reach"
+    export AGENT_REACH_VENV_HOME="/home/node/.agent-reach-venv"
+    export PATH="$AGENT_REACH_HOME/bin:$PATH"
+    
+    if [ -d "$AGENT_REACH_VENV_HOME/bin" ]; then
+        export PATH="$AGENT_REACH_VENV_HOME/bin:$PATH"
+    fi
+
+    # 创建一个全局包装脚本，确保交互式 shell 也能直接使用 agent-reach
+    if [ -x "$AGENT_REACH_VENV_HOME/bin/agent-reach" ]; then
+        cat > /usr/local/bin/agent-reach <<EOF
+#!/bin/bash
+source $AGENT_REACH_VENV_HOME/bin/activate
+exec $AGENT_REACH_VENV_HOME/bin/agent-reach "\$@"
+EOF
+        chmod +x /usr/local/bin/agent-reach
+    fi
+    
     export DBUS_SESSION_BUS_ADDRESS=/dev/null
+}
+
+install_agent_reach() {
+    if [ "${AGENT_REACH_ENABLED:-false}" != "true" ]; then
+        return
+    fi
+
+    log_section "安装 Agent Reach"
+
+    local github_url="https://github.com/Panniantong/agent-reach/archive/main.zip"
+    local pip_mirror=""
+    local pip_index_env=""
+
+    if [ "${AGENT_REACH_USE_CN_MIRROR:-false}" = "true" ]; then
+        github_url="https://gh.llkk.cc/https://github.com/Panniantong/agent-reach/archive/main.zip"
+        pip_mirror="-i https://pypi.tuna.tsinghua.edu.cn/simple"
+        pip_index_env="export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple"
+    fi
+
+    if gosu node test -f /home/node/.agent-reach-venv/bin/agent-reach; then
+        local check_output
+        check_output="$(gosu node bash -c "
+            export PATH=\$PATH:/home/node/.local/bin
+            $pip_index_env
+            source ~/.agent-reach-venv/bin/activate
+            /home/node/.agent-reach-venv/bin/agent-reach check-update 2>&1 || true
+        ")"
+        echo "$check_output"
+
+        if echo "$check_output" | grep -q '已是最新版本'; then
+            echo "Agent Reach 已是最新版本，跳过安装步骤"
+            return
+        fi
+
+        echo "Agent Reach 检测到可更新版本，开始自动更新..."
+        gosu node bash -c "
+            export PATH=\$PATH:/home/node/.local/bin
+            $pip_index_env
+            source ~/.agent-reach-venv/bin/activate
+            pip install --upgrade pip $pip_mirror
+            pip install --upgrade $github_url $pip_mirror
+        "
+    else
+        gosu node bash -c "
+            export PATH=\$PATH:/home/node/.local/bin
+            $pip_index_env
+            python3 -m venv ~/.agent-reach-venv
+            source ~/.agent-reach-venv/bin/activate
+            pip install --upgrade pip $pip_mirror
+            pip install $github_url $pip_mirror
+            agent-reach install --env=auto 
+        "
+    fi
+
+    gosu node bash -c "
+        export PATH=\$PATH:/home/node/.local/bin
+        $pip_index_env
+        source ~/.agent-reach-venv/bin/activate
+
+        # 配置代理（如果提供）
+        if [ -n \"\$AGENT_REACH_PROXY\" ]; then
+            agent-reach configure proxy \"\$AGENT_REACH_PROXY\"
+        fi
+
+        # 配置 Twitter Cookies
+        if [ -n \"\$AGENT_REACH_TWITTER_COOKIES\" ]; then
+            agent-reach configure twitter-cookies \"\$AGENT_REACH_TWITTER_COOKIES\"
+        fi
+
+        # 配置 Groq Key
+        if [ -n \"\$AGENT_REACH_GROQ_KEY\" ]; then
+            agent-reach configure groq-key \"\$AGENT_REACH_GROQ_KEY\"
+        fi
+        
+        # 配置小红书 Cookies
+        if [ -n \"\$AGENT_REACH_XHS_COOKIES\" ]; then
+            agent-reach configure xhs-cookies \"\$AGENT_REACH_XHS_COOKIES\"
+        fi
+    "
+    
+    # 建立软链接到 /usr/local/bin 以便全局访问（如果需要）
+    # 但我们已经在 setup_runtime_env 中处理了 PATH
+
+    # 检查工作空间父目录下的 skills 目录中是否存在 agent-reach，若存在则同步到工作空间（仅删除目标 SKILL.md 并覆盖）
+    local workspace_parent
+    workspace_parent="$(dirname "$OPENCLAW_WORKSPACE")"
+    if [ -d "$workspace_parent/skills/agent-reach" ]; then
+        local src="$workspace_parent/skills/agent-reach"
+        local dst="$OPENCLAW_WORKSPACE/skills/agent-reach"
+        echo "检测到 $src，正在将其同步到工作空间: $dst"
+        mkdir -p "$dst"
+        rm -f "$dst/SKILL.md"
+        cp -af "$src/." "$dst/" || true
+        rm -rf "$src"
+        if is_root; then
+            chown -R node:node "$dst" || true
+        fi
+    fi
 }
 
 cleanup() {
@@ -1828,7 +2102,8 @@ start_gateway() {
     log_section "启动 OpenClaw Gateway"
 
     gosu node env HOME=/home/node DBUS_SESSION_BUS_ADDRESS=/dev/null \
-        BUN_INSTALL="/usr/local" PATH="/usr/local/bin:$PATH" \
+        BUN_INSTALL="/usr/local" AGENT_REACH_HOME="/home/node/.agent-reach" AGENT_REACH_VENV_HOME="/home/node/.agent-reach-venv" \
+        PATH="/home/node/.agent-reach-venv/bin:/usr/local/bin:$PATH" \
         openclaw gateway run \
         --bind "$OPENCLAW_GATEWAY_BIND" \
         --port "$OPENCLAW_GATEWAY_PORT" \
@@ -1855,7 +2130,10 @@ finalize_permissions() {
 main() {
     log_section "OpenClaw 初始化脚本"
     ensure_directories
+    ensure_config_persistence
     fix_permissions_if_needed
+    sync_seed_extensions
+    install_agent_reach
     sync_config_with_env
     finalize_permissions
     print_runtime_summary
